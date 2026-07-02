@@ -32,6 +32,7 @@
 namespace livox_ros {
 
 std::atomic<bool> PubHandler::is_timestamp_sync_;
+std::atomic<bool> PubHandler::force_host_timestamps_{false};
 
 PubHandler &pub_handler() {
   static PubHandler handler;
@@ -70,6 +71,10 @@ void PubHandler::SetPointCloudConfig(const double publish_freq) {
     point_process_thread_ = std::make_shared<std::thread>(&PubHandler::RawDataProcess, this);
   }
   return;
+}
+
+void PubHandler::SetForceHostTimestamps(bool force_host_timestamps) {
+  force_host_timestamps_.store(force_host_timestamps);
 }
 
 void PubHandler::SetImuDataCallback(ImuDataCallback cb, void* client_data) {
@@ -262,7 +267,18 @@ bool PubHandler::GetLidarId(LidarProtoType lidar_type, uint32_t handle, uint32_t
   return false;
 }
 
+uint64_t PubHandler::GetHostTimestamp() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+}
+
 uint64_t PubHandler::GetEthPacketTimestamp(uint8_t timestamp_type, uint8_t* time_stamp, uint8_t size) {
+  if (force_host_timestamps_.load()) {
+    return GetHostTimestamp();
+  }
+
   LdsStamp time;
   memcpy(time.stamp_bytes, time_stamp, size);
 
@@ -271,7 +287,7 @@ uint64_t PubHandler::GetEthPacketTimestamp(uint8_t timestamp_type, uint8_t* time
     return time.stamp;
   }
 
-  return std::chrono::high_resolution_clock::now().time_since_epoch().count();
+  return GetHostTimestamp();
 }
 
 /*******************************/

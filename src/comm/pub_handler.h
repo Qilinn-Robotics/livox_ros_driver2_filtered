@@ -85,6 +85,7 @@ class PubHandler {
   void RequestExit();
   void Init();
   void SetPointCloudConfig(const double publish_freq);
+  void SetForceHostTimestamps(bool force_host_timestamps);
   void SetPointCloudsCallback(PointCloudsCallback cb, void* client_data);
   void AddLidarsExtParam(LidarExtParameter& extrinsic_params);
   void ClearAllLidarsExtrinsicParams();
@@ -106,6 +107,7 @@ class PubHandler {
   
   static bool GetLidarId(LidarProtoType lidar_type, uint32_t handle, uint32_t& id);
   static uint64_t GetEthPacketTimestamp(uint8_t timestamp_type, uint8_t* time_stamp, uint8_t size);
+  static uint64_t GetHostTimestamp();
 
   PointCloudsCallback points_callback_;
   void* pub_client_data_ = nullptr;
@@ -127,6 +129,7 @@ class PubHandler {
   std::map<uint32_t, std::vector<PointXyzlt>> points_;
   std::map<uint32_t, LidarExtParameter> lidar_extrinsics_;
   static std::atomic<bool> is_timestamp_sync_;
+  static std::atomic<bool> force_host_timestamps_;
   uint16_t lidar_listen_id_ = 0;
 };
 

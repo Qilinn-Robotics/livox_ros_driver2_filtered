@@ -44,6 +44,7 @@ livox_ros2_params = [
     {"lvx_file_path": lvx_file_path},
     {"user_config_path": user_config_path},
     {"cmdline_input_bd_code": cmdline_bd_code},
+    {"force_host_timestamps": True},
     {"self_filter_enabled": True},
     {"self_filter_box_filters": self_filter_box_filters},
     {"self_filter_box_padding": 0.08},
