@@ -55,7 +55,7 @@ livox_ros2_params = [
     {"self_filter_lidar_to_base_yaw": 1.5708},
     {"self_filter_front_crop_enabled": False},
     {"self_filter_enforce_monotonic_timestamps": True},
-    {"self_filter_drop_stale_stamps": True},
+    {"self_filter_drop_stale_stamps": False},
     {"self_filter_max_stamp_age_s": 1.0},
     {"self_filter_stamp_regression_tolerance_s": 0.02},
     {"self_filter_timebase_regression_tolerance_s": 0.02},

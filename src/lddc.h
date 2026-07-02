@@ -180,7 +180,7 @@ class Lddc final {
   bool self_filter_enabled_{false};
   bool self_filter_front_crop_enabled_{false};
   bool self_filter_enforce_monotonic_timestamps_{true};
-  bool self_filter_drop_stale_stamps_{true};
+  bool self_filter_drop_stale_stamps_{false};
   double self_filter_box_padding_{0.03};
   double self_filter_lidar_to_base_x_{0.21};
   double self_filter_lidar_to_base_y_{0.0};
