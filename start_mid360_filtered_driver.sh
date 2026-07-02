@@ -4,8 +4,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXPECTED_PREFIX="${SCRIPT_DIR}/install/livox_ros_driver2"
 
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-65}"
-export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
+export ROS_DOMAIN_ID=65
+export ROS_LOCALHOST_ONLY=0
 
 # Keep this fork isolated from previously sourced workspaces.
 unset AMENT_PREFIX_PATH
