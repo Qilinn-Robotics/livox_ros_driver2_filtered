@@ -27,10 +27,15 @@
 #include "comm/comm.h"
 
 #include <inttypes.h>
+#include <algorithm>
+#include <chrono>
 #include <iostream>
 #include <iomanip>
+#include <limits>
 #include <math.h>
 #include <stdint.h>
+#include <sstream>
+#include <stdexcept>
 
 #include "include/ros_headers.h"
 
@@ -38,6 +43,132 @@
 #include "lds_lidar.h"
 
 namespace livox_ros {
+
+namespace {
+
+std::string Trim(const std::string& text) {
+  const auto start = text.find_first_not_of(" \t\r\n");
+  if (start == std::string::npos) {
+    return "";
+  }
+  const auto end = text.find_last_not_of(" \t\r\n");
+  return text.substr(start, end - start + 1);
+}
+
+std::vector<double> SplitDoubles(const std::string& text) {
+  std::vector<double> values;
+  std::stringstream ss(text);
+  std::string token;
+  while (std::getline(ss, token, ',')) {
+    token = Trim(token);
+    if (!token.empty()) {
+      values.push_back(std::stod(token));
+    }
+  }
+  return values;
+}
+
+Lddc::BoxFilter ParseBoxFilter(const std::string& value) {
+  const auto separator = value.find(':');
+  std::string name = "box";
+  std::string payload = value;
+  if (separator != std::string::npos) {
+    name = Trim(value.substr(0, separator));
+    payload = value.substr(separator + 1);
+  }
+  if (name.empty()) {
+    name = "box";
+  }
+
+  const auto parts = SplitDoubles(payload);
+  Lddc::BoxFilter box;
+  box.name = name;
+  if (parts.size() == 6) {
+    box.center.x = parts[0];
+    box.center.y = parts[1];
+    box.center.z = parts[2];
+    box.rpy.x = 0.0;
+    box.rpy.y = 0.0;
+    box.rpy.z = 0.0;
+    box.size.x = parts[3];
+    box.size.y = parts[4];
+    box.size.z = parts[5];
+  } else if (parts.size() == 9) {
+    box.center.x = parts[0];
+    box.center.y = parts[1];
+    box.center.z = parts[2];
+    box.rpy.x = parts[3];
+    box.rpy.y = parts[4];
+    box.rpy.z = parts[5];
+    box.size.x = parts[6];
+    box.size.y = parts[7];
+    box.size.z = parts[8];
+  } else {
+    throw std::runtime_error(
+        "self_filter_box_filters entries must have 6 or 9 values");
+  }
+
+  if (box.size.x <= 0.0 || box.size.y <= 0.0 || box.size.z <= 0.0) {
+    throw std::runtime_error("self-filter box '" + box.name + "' size must be positive");
+  }
+  return box;
+}
+
+Lddc::Mat3 RotationMatrixFromRpy(double roll, double pitch, double yaw) {
+  const double cr = std::cos(roll);
+  const double sr = std::sin(roll);
+  const double cp = std::cos(pitch);
+  const double sp = std::sin(pitch);
+  const double cy = std::cos(yaw);
+  const double sy = std::sin(yaw);
+
+  Lddc::Mat3 m;
+  m.v[0][0] = cy * cp;
+  m.v[0][1] = cy * sp * sr - sy * cr;
+  m.v[0][2] = cy * sp * cr + sy * sr;
+  m.v[1][0] = sy * cp;
+  m.v[1][1] = sy * sp * sr + cy * cr;
+  m.v[1][2] = sy * sp * cr - cy * sr;
+  m.v[2][0] = -sp;
+  m.v[2][1] = cp * sr;
+  m.v[2][2] = cp * cr;
+  return m;
+}
+
+Lddc::Vec3 TransformPoint(const Lddc::Vec3& point, const Lddc::Mat4& transform) {
+  Lddc::Vec3 out;
+  out.x = transform.v[0][0] * point.x + transform.v[0][1] * point.y +
+      transform.v[0][2] * point.z + transform.v[0][3];
+  out.y = transform.v[1][0] * point.x + transform.v[1][1] * point.y +
+      transform.v[1][2] * point.z + transform.v[1][3];
+  out.z = transform.v[2][0] * point.x + transform.v[2][1] * point.y +
+      transform.v[2][2] * point.z + transform.v[2][3];
+  return out;
+}
+
+bool PointInBox(const Lddc::Vec3& point, const Lddc::BoxFilter& box, double padding) {
+  const auto rotation = RotationMatrixFromRpy(box.rpy.x, box.rpy.y, box.rpy.z);
+  const double dx = point.x - box.center.x;
+  const double dy = point.y - box.center.y;
+  const double dz = point.z - box.center.z;
+
+  const double lx = dx * rotation.v[0][0] + dy * rotation.v[1][0] + dz * rotation.v[2][0];
+  const double ly = dx * rotation.v[0][1] + dy * rotation.v[1][1] + dz * rotation.v[2][1];
+  const double lz = dx * rotation.v[0][2] + dy * rotation.v[1][2] + dz * rotation.v[2][2];
+
+  return std::abs(lx) <= 0.5 * box.size.x + padding &&
+         std::abs(ly) <= 0.5 * box.size.y + padding &&
+         std::abs(lz) <= 0.5 * box.size.z + padding;
+}
+
+#ifdef BUILDING_ROS2
+uint64_t StampToNs(const builtin_interfaces::msg::Time& stamp) {
+  return static_cast<uint64_t>(stamp.sec) * 1000000000ULL +
+         static_cast<uint64_t>(stamp.nanosec);
+}
+#endif
+
+}  // namespace
 
 /** Lidar Data Distribute Control--------------------------------------------*/
 #ifdef BUILDING_ROS1
@@ -104,6 +235,163 @@ Lddc::~Lddc() {
   }
 #endif
   std::cout << "lddc destory!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
+}
+
+void Lddc::SetRosNode(livox_ros::DriverNode *node) {
+  cur_node_ = node;
+  ConfigureSelfFilterTransform();
+  LoadSelfFilterConfigFromRosParams();
+}
+
+void Lddc::ConfigureSelfFilterTransform() {
+  const auto rotation = RotationMatrixFromRpy(
+      self_filter_lidar_to_base_roll_, self_filter_lidar_to_base_pitch_,
+      self_filter_lidar_to_base_yaw_);
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      self_filter_lidar_to_base_.v[r][c] = 0.0;
+    }
+  }
+  for (int r = 0; r < 3; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      self_filter_lidar_to_base_.v[r][c] = rotation.v[r][c];
+    }
+  }
+  self_filter_lidar_to_base_.v[0][3] = self_filter_lidar_to_base_x_;
+  self_filter_lidar_to_base_.v[1][3] = self_filter_lidar_to_base_y_;
+  self_filter_lidar_to_base_.v[2][3] = self_filter_lidar_to_base_z_;
+  self_filter_lidar_to_base_.v[3][3] = 1.0;
+}
+
+void Lddc::LoadSelfFilterConfigFromRosParams() {
+#ifdef BUILDING_ROS2
+  if (!cur_node_) {
+    return;
+  }
+  auto& node = cur_node_->GetNode();
+
+  auto declare_bool = [&node](const std::string& name, bool default_value) {
+    if (!node.has_parameter(name)) {
+      node.declare_parameter<bool>(name, default_value);
+    }
+    bool value = default_value;
+    node.get_parameter(name, value);
+    return value;
+  };
+  auto declare_double = [&node](const std::string& name, double default_value) {
+    if (!node.has_parameter(name)) {
+      node.declare_parameter<double>(name, default_value);
+    }
+    double value = default_value;
+    node.get_parameter(name, value);
+    return value;
+  };
+  auto declare_int = [&node](const std::string& name, int default_value) {
+    if (!node.has_parameter(name)) {
+      node.declare_parameter<int>(name, default_value);
+    }
+    int value = default_value;
+    node.get_parameter(name, value);
+    return value;
+  };
+  auto declare_string_vector =
+      [&node](const std::string& name, const std::vector<std::string>& default_value) {
+    if (!node.has_parameter(name)) {
+      node.declare_parameter<std::vector<std::string>>(name, default_value);
+    }
+    std::vector<std::string> value = default_value;
+    node.get_parameter(name, value);
+    return value;
+  };
+
+  self_filter_enabled_ = declare_bool("self_filter_enabled", false);
+  self_filter_box_padding_ =
+      std::max(0.0, declare_double("self_filter_box_padding", self_filter_box_padding_));
+  self_filter_lidar_to_base_x_ =
+      declare_double("self_filter_lidar_to_base_x", self_filter_lidar_to_base_x_);
+  self_filter_lidar_to_base_y_ =
+      declare_double("self_filter_lidar_to_base_y", self_filter_lidar_to_base_y_);
+  self_filter_lidar_to_base_z_ =
+      declare_double("self_filter_lidar_to_base_z", self_filter_lidar_to_base_z_);
+  self_filter_lidar_to_base_roll_ =
+      declare_double("self_filter_lidar_to_base_roll", self_filter_lidar_to_base_roll_);
+  self_filter_lidar_to_base_pitch_ =
+      declare_double("self_filter_lidar_to_base_pitch", self_filter_lidar_to_base_pitch_);
+  self_filter_lidar_to_base_yaw_ =
+      declare_double("self_filter_lidar_to_base_yaw", self_filter_lidar_to_base_yaw_);
+  self_filter_front_crop_enabled_ =
+      declare_bool("self_filter_front_crop_enabled", self_filter_front_crop_enabled_);
+  self_filter_front_x_min_ =
+      declare_double("self_filter_front_x_min", self_filter_front_x_min_);
+  self_filter_front_x_max_ =
+      declare_double("self_filter_front_x_max", self_filter_front_x_max_);
+  self_filter_front_y_min_ =
+      declare_double("self_filter_front_y_min", self_filter_front_y_min_);
+  self_filter_front_y_max_ =
+      declare_double("self_filter_front_y_max", self_filter_front_y_max_);
+  self_filter_front_z_min_ =
+      declare_double("self_filter_front_z_min", self_filter_front_z_min_);
+  self_filter_front_z_max_ =
+      declare_double("self_filter_front_z_max", self_filter_front_z_max_);
+  self_filter_enforce_monotonic_timestamps_ =
+      declare_bool("self_filter_enforce_monotonic_timestamps",
+                   self_filter_enforce_monotonic_timestamps_);
+  self_filter_drop_stale_stamps_ =
+      declare_bool("self_filter_drop_stale_stamps", self_filter_drop_stale_stamps_);
+  self_filter_max_stamp_age_s_ =
+      std::max(0.0, declare_double("self_filter_max_stamp_age_s", self_filter_max_stamp_age_s_));
+  self_filter_stamp_regression_tolerance_s_ = std::max(
+      0.0, declare_double("self_filter_stamp_regression_tolerance_s",
+                          self_filter_stamp_regression_tolerance_s_));
+  self_filter_timebase_regression_tolerance_s_ = std::max(
+      0.0, declare_double("self_filter_timebase_regression_tolerance_s",
+                          self_filter_timebase_regression_tolerance_s_));
+  self_filter_min_input_points_ =
+      std::max(0, declare_int("self_filter_min_input_points", self_filter_min_input_points_));
+  self_filter_min_output_points_ =
+      std::max(0, declare_int("self_filter_min_output_points", self_filter_min_output_points_));
+  self_filter_stats_log_period_s_ =
+      std::max(0.1, declare_double("self_filter_stats_log_period_s",
+                                   self_filter_stats_log_period_s_));
+
+  self_filter_boxes_.clear();
+  const auto box_values =
+      declare_string_vector("self_filter_box_filters", std::vector<std::string>{});
+  try {
+    for (const auto& value : box_values) {
+      if (!Trim(value).empty()) {
+        self_filter_boxes_.push_back(ParseBoxFilter(value));
+      }
+    }
+  } catch (const std::exception& exc) {
+    DRIVER_ERROR(node, "Invalid Livox self-filter box config: %s", exc.what());
+    self_filter_enabled_ = false;
+    self_filter_boxes_.clear();
+  }
+
+  ConfigureSelfFilterTransform();
+
+  if (self_filter_enabled_) {
+    std::ostringstream names;
+    for (size_t i = 0; i < self_filter_boxes_.size(); ++i) {
+      if (i > 0) {
+        names << ", ";
+      }
+      names << self_filter_boxes_[i].name;
+    }
+    DRIVER_INFO(
+        node,
+        "Livox driver embedded self-filter enabled: /livox/lidar is filtered in-place, "
+        "boxes=%s, box_padding=%.3f, min_input_points=%d, min_output_points=%d, "
+        "max_stamp_age=%.3fs, lidar_to_base=(%.3f, %.3f, %.3f, %.3f, %.3f, %.4f)",
+        self_filter_boxes_.empty() ? "(none)" : names.str().c_str(),
+        self_filter_box_padding_, self_filter_min_input_points_, self_filter_min_output_points_,
+        self_filter_max_stamp_age_s_, self_filter_lidar_to_base_x_,
+        self_filter_lidar_to_base_y_, self_filter_lidar_to_base_z_,
+        self_filter_lidar_to_base_roll_, self_filter_lidar_to_base_pitch_,
+        self_filter_lidar_to_base_yaw_);
+  }
+#endif
 }
 
 int Lddc::RegisterLds(Lds *lds) {
@@ -226,6 +514,12 @@ void Lddc::PublishCustomPointcloud(LidarDataQueue *queue, uint8_t index) {
     CustomMsg livox_msg;
     InitCustomMsg(livox_msg, pkg, index);
     FillPointsToCustomMsg(livox_msg, pkg);
+    if (!AcceptCustomMsgTimestamp(livox_msg)) {
+      continue;
+    }
+    if (!ApplySelfFilter(livox_msg)) {
+      continue;
+    }
     PublishCustomPointData(livox_msg, index);
   }
 }
@@ -398,6 +692,274 @@ void Lddc::FillPointsToCustomMsg(CustomMsg& livox_msg, const StoragePacket& pkg)
   }
 }
 
+bool Lddc::AcceptCustomMsgTimestamp(const CustomMsg& livox_msg) {
+#ifndef BUILDING_ROS2
+  return true;
+#else
+  if (!self_filter_enabled_) {
+    return true;
+  }
+  const uint64_t stamp_ns = StampToNs(livox_msg.header.stamp);
+  const bool has_stamp = stamp_ns > 0;
+
+  double age_ms = std::numeric_limits<double>::quiet_NaN();
+#ifdef BUILDING_ROS2
+  if (cur_node_ && has_stamp) {
+    const int64_t now_ns = cur_node_->now().nanoseconds();
+    age_ms = static_cast<double>(now_ns - static_cast<int64_t>(stamp_ns)) * 1.0e-6;
+  }
+#endif
+
+  if (self_filter_drop_stale_stamps_ && has_stamp && std::isfinite(age_ms) &&
+      age_ms > self_filter_max_stamp_age_s_ * 1000.0) {
+    ++self_filter_dropped_stale_count_;
+    if (cur_node_ && self_filter_dropped_stale_count_ % 20 == 1) {
+      DRIVER_WARN(
+          *cur_node_,
+          "dropping stale Livox frame before FAST-LIO: stamp_age=%.1fms > %.1fms, "
+          "timebase=%" PRIu64 ", dropped_stale=%" PRIu64,
+          age_ms, self_filter_max_stamp_age_s_ * 1000.0, livox_msg.timebase,
+          self_filter_dropped_stale_count_);
+    }
+    return false;
+  }
+
+  const uint64_t stamp_tolerance_ns = static_cast<uint64_t>(
+      self_filter_stamp_regression_tolerance_s_ * 1000000000.0);
+  if (self_filter_enforce_monotonic_timestamps_ && has_stamp &&
+      self_filter_last_lidar_stamp_ns_ > 0 &&
+      stamp_ns + stamp_tolerance_ns < self_filter_last_lidar_stamp_ns_) {
+    ++self_filter_dropped_regression_count_;
+    if (cur_node_ && self_filter_dropped_regression_count_ % 20 == 1) {
+      DRIVER_WARN(
+          *cur_node_,
+          "dropping out-of-order Livox frame before FAST-LIO: stamp regressed by %.3fs, "
+          "last=%" PRIu64 ", current=%" PRIu64 ", dropped_regression=%" PRIu64,
+          static_cast<double>(self_filter_last_lidar_stamp_ns_ - stamp_ns) * 1.0e-9,
+          self_filter_last_lidar_stamp_ns_, stamp_ns, self_filter_dropped_regression_count_);
+    }
+    return false;
+  }
+
+  const uint64_t timebase_tolerance_ns = static_cast<uint64_t>(
+      self_filter_timebase_regression_tolerance_s_ * 1000000000.0);
+  if (self_filter_enforce_monotonic_timestamps_ && livox_msg.timebase > 0 &&
+      self_filter_last_lidar_timebase_ > 0 &&
+      livox_msg.timebase + timebase_tolerance_ns < self_filter_last_lidar_timebase_) {
+    ++self_filter_dropped_regression_count_;
+    if (cur_node_ && self_filter_dropped_regression_count_ % 20 == 1) {
+      DRIVER_WARN(
+          *cur_node_,
+          "dropping out-of-order Livox frame before FAST-LIO: timebase regressed by %.3fs, "
+          "last=%" PRIu64 ", current=%" PRIu64 ", dropped_regression=%" PRIu64,
+          static_cast<double>(self_filter_last_lidar_timebase_ - livox_msg.timebase) * 1.0e-9,
+          self_filter_last_lidar_timebase_, livox_msg.timebase,
+          self_filter_dropped_regression_count_);
+    }
+    return false;
+  }
+
+  if (has_stamp) {
+    self_filter_last_lidar_stamp_ns_ = std::max(self_filter_last_lidar_stamp_ns_, stamp_ns);
+  }
+  if (livox_msg.timebase > 0) {
+    self_filter_last_lidar_timebase_ =
+        std::max(self_filter_last_lidar_timebase_, livox_msg.timebase);
+  }
+  return true;
+#endif
+}
+
+bool Lddc::AcceptImuTimestamp(uint64_t timestamp) {
+  if (!self_filter_enabled_ || timestamp == 0) {
+    return true;
+  }
+
+  double age_ms = std::numeric_limits<double>::quiet_NaN();
+#ifdef BUILDING_ROS2
+  if (cur_node_) {
+    const int64_t now_ns = cur_node_->now().nanoseconds();
+    age_ms = static_cast<double>(now_ns - static_cast<int64_t>(timestamp)) * 1.0e-6;
+  }
+#endif
+
+  if (self_filter_drop_stale_stamps_ && std::isfinite(age_ms) &&
+      age_ms > self_filter_max_stamp_age_s_ * 1000.0) {
+    ++self_filter_dropped_stale_count_;
+    if (cur_node_ && self_filter_dropped_stale_count_ % 50 == 1) {
+      DRIVER_WARN(
+          *cur_node_,
+          "dropping stale Livox IMU before FAST-LIO: stamp_age=%.1fms > %.1fms, "
+          "dropped_stale=%" PRIu64,
+          age_ms, self_filter_max_stamp_age_s_ * 1000.0, self_filter_dropped_stale_count_);
+    }
+    return false;
+  }
+
+  const uint64_t tolerance_ns = static_cast<uint64_t>(
+      self_filter_stamp_regression_tolerance_s_ * 1000000000.0);
+  if (self_filter_enforce_monotonic_timestamps_ && self_filter_last_imu_stamp_ns_ > 0 &&
+      timestamp + tolerance_ns < self_filter_last_imu_stamp_ns_) {
+    ++self_filter_dropped_regression_count_;
+    if (cur_node_ && self_filter_dropped_regression_count_ % 50 == 1) {
+      DRIVER_WARN(
+          *cur_node_,
+          "dropping out-of-order Livox IMU before FAST-LIO: stamp regressed by %.3fs, "
+          "last=%" PRIu64 ", current=%" PRIu64 ", dropped_regression=%" PRIu64,
+          static_cast<double>(self_filter_last_imu_stamp_ns_ - timestamp) * 1.0e-9,
+          self_filter_last_imu_stamp_ns_, timestamp, self_filter_dropped_regression_count_);
+    }
+    return false;
+  }
+
+  self_filter_last_imu_stamp_ns_ = std::max(self_filter_last_imu_stamp_ns_, timestamp);
+  return true;
+}
+
+bool Lddc::RejectBySelfBoxes(const Vec3& point) const {
+  if (!(std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z))) {
+    return false;
+  }
+  for (const auto& box : self_filter_boxes_) {
+    if (PointInBox(point, box, self_filter_box_padding_)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Lddc::RejectByCrop(const Vec3& point) const {
+  if (!self_filter_front_crop_enabled_) {
+    return false;
+  }
+  return !(std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z) &&
+           point.x >= self_filter_front_x_min_ && point.x <= self_filter_front_x_max_ &&
+           point.y >= self_filter_front_y_min_ && point.y <= self_filter_front_y_max_ &&
+           point.z >= self_filter_front_z_min_ && point.z <= self_filter_front_z_max_);
+}
+
+void Lddc::MaybeLogSelfFilterStats(uint32_t total, uint32_t kept, uint32_t rejected_self,
+                                   uint32_t rejected_crop, double stamp_age_ms,
+                                   double process_ms) {
+#ifndef BUILDING_ROS2
+  (void)total;
+  (void)kept;
+  (void)rejected_self;
+  (void)rejected_crop;
+  (void)stamp_age_ms;
+  (void)process_ms;
+  return;
+#else
+  if (!cur_node_) {
+    return;
+  }
+  const uint64_t now_ns = static_cast<uint64_t>(cur_node_->now().nanoseconds());
+  const uint64_t period_ns = static_cast<uint64_t>(
+      self_filter_stats_log_period_s_ * 1000000000.0);
+  if (self_filter_last_stats_log_ns_ > 0 &&
+      now_ns < self_filter_last_stats_log_ns_ + period_ns) {
+    return;
+  }
+  self_filter_last_stats_log_ns_ = now_ns;
+  const double ratio = 100.0 * static_cast<double>(kept) /
+      static_cast<double>(std::max<uint32_t>(total, 1));
+  if (std::isfinite(stamp_age_ms)) {
+    DRIVER_INFO(
+        *cur_node_,
+        "livox embedded self-filter stats: input=%u, kept=%u (%.1f%%), "
+        "self_rejected=%u, crop_rejected=%u, stamp_age=%.1fms, process=%.1fms",
+        total, kept, ratio, rejected_self, rejected_crop, stamp_age_ms, process_ms);
+  } else {
+    DRIVER_INFO(
+        *cur_node_,
+        "livox embedded self-filter stats: input=%u, kept=%u (%.1f%%), "
+        "self_rejected=%u, crop_rejected=%u, stamp_age=unknown, process=%.1fms",
+        total, kept, ratio, rejected_self, rejected_crop, process_ms);
+  }
+#endif
+}
+
+bool Lddc::ApplySelfFilter(CustomMsg& livox_msg) {
+  if (!self_filter_enabled_) {
+    return true;
+  }
+
+  const auto callback_start = std::chrono::steady_clock::now();
+  const uint32_t input_points = static_cast<uint32_t>(livox_msg.points.size());
+  double stamp_age_ms = std::numeric_limits<double>::quiet_NaN();
+#ifdef BUILDING_ROS2
+  const uint64_t stamp_ns = StampToNs(livox_msg.header.stamp);
+  if (cur_node_ && stamp_ns > 0) {
+    stamp_age_ms =
+        static_cast<double>(cur_node_->now().nanoseconds() - static_cast<int64_t>(stamp_ns)) *
+        1.0e-6;
+  }
+#endif
+
+  if (self_filter_min_input_points_ > 0 &&
+      input_points < static_cast<uint32_t>(self_filter_min_input_points_)) {
+    ++self_filter_dropped_low_points_count_;
+    if (cur_node_ && self_filter_dropped_low_points_count_ % 10 == 1) {
+      DRIVER_WARN(
+          *cur_node_,
+          "dropping low-point Livox frame before FAST-LIO: input=%u, point_num=%u, "
+          "min_input_points=%d, stamp_age=%.1fms, dropped_low_points=%" PRIu64,
+          input_points, livox_msg.point_num, self_filter_min_input_points_, stamp_age_ms,
+          self_filter_dropped_low_points_count_);
+    }
+    return false;
+  }
+
+  std::vector<CustomPoint> kept_points;
+  kept_points.reserve(livox_msg.points.size());
+  uint32_t rejected_self = 0;
+  uint32_t rejected_crop = 0;
+
+  for (const auto& point : livox_msg.points) {
+    Vec3 lidar_point;
+    lidar_point.x = point.x;
+    lidar_point.y = point.y;
+    lidar_point.z = point.z;
+    const Vec3 base_point = TransformPoint(lidar_point, self_filter_lidar_to_base_);
+    const bool self_reject = RejectBySelfBoxes(base_point);
+    const bool crop_reject = !self_reject && RejectByCrop(base_point);
+    if (self_reject) {
+      ++rejected_self;
+      continue;
+    }
+    if (crop_reject) {
+      ++rejected_crop;
+      continue;
+    }
+    kept_points.push_back(point);
+  }
+
+  livox_msg.points.swap(kept_points);
+  livox_msg.point_num = static_cast<uint32_t>(livox_msg.points.size());
+
+  const double process_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - callback_start).count();
+
+  if (self_filter_min_output_points_ > 0 &&
+      livox_msg.point_num < static_cast<uint32_t>(self_filter_min_output_points_)) {
+    ++self_filter_dropped_low_points_count_;
+    if (cur_node_ && self_filter_dropped_low_points_count_ % 10 == 1) {
+      DRIVER_WARN(
+          *cur_node_,
+          "dropping low-point Livox frame after self-filter: input=%u, kept=%u, "
+          "min_output_points=%d, self_rejected=%u, crop_rejected=%u, "
+          "stamp_age=%.1fms, process=%.1fms, dropped_low_points=%" PRIu64,
+          input_points, livox_msg.point_num, self_filter_min_output_points_, rejected_self,
+          rejected_crop, stamp_age_ms, process_ms, self_filter_dropped_low_points_count_);
+    }
+    return false;
+  }
+
+  MaybeLogSelfFilterStats(
+      input_points, livox_msg.point_num, rejected_self, rejected_crop, stamp_age_ms, process_ms);
+  return true;
+}
+
 void Lddc::PublishCustomPointData(const CustomMsg& livox_msg, const uint8_t index) {
 #ifdef BUILDING_ROS1
   PublisherPtr publisher_ptr = Lddc::GetCurrentPublisher(index);
@@ -505,6 +1067,9 @@ void Lddc::PublishImuData(LidarImuDataQueue& imu_data_queue, const uint8_t index
   ImuMsg imu_msg;
   uint64_t timestamp;
   InitImuMsg(imu_data, imu_msg, timestamp);
+  if (!AcceptImuTimestamp(timestamp)) {
+    return;
+  }
 
 #ifdef BUILDING_ROS1
   PublisherPtr publisher_ptr = GetCurrentImuPublisher(index);

@@ -14,6 +14,21 @@ frame_id      = 'livox_frame'
 lvx_file_path = '/home/livox/livox_test.lvx'
 cmdline_bd_code = 'livox0000000001'
 
+# Embedded self-filter for the real Ranger Mini V3 + IMPS setup.
+# The driver still publishes /livox/lidar, but self/body points are removed
+# before FAST-LIO receives them.
+self_filter_box_filters = [
+    "base_body:0.0,0.0,-0.10,0.0,0.0,0.0,0.50,0.35,0.20",
+    "body_top_deck:0.0,0.0,0.05,0.0,0.0,0.0,0.72,0.50,0.08",
+    "body_upper_self_envelope:0.0,0.0,0.28,0.0,0.0,0.0,0.72,0.50,0.46",
+    "low_imp_vertical:-0.21,0.11,0.20,0.0,0.0,0.0,0.04,0.04,0.30",
+    "low_imp_horizontal:-0.21,0.33,0.33,0.0,0.0,0.0,0.04,0.40,0.04",
+    "high_imp_vertical:-0.21,-0.11,0.35,0.0,0.0,0.0,0.04,0.04,0.60",
+    "high_imp_horizontal:-0.21,-0.38,0.63,0.0,0.0,0.0,0.04,0.50,0.04",
+    "low_imp_ray_guard:0.0,0.055,0.28,0.0,0.0,2.885,0.58,0.12,0.50",
+    "high_imp_ray_guard:0.0,-0.055,0.28,0.0,0.0,-2.885,0.58,0.12,0.50",
+]
+
 cur_path = os.path.split(os.path.realpath(__file__))[0] + '/'
 cur_config_path = cur_path + '../config'
 user_config_path = os.path.join(cur_config_path, 'MID360_config.json')
@@ -28,7 +43,25 @@ livox_ros2_params = [
     {"frame_id": frame_id},
     {"lvx_file_path": lvx_file_path},
     {"user_config_path": user_config_path},
-    {"cmdline_input_bd_code": cmdline_bd_code}
+    {"cmdline_input_bd_code": cmdline_bd_code},
+    {"self_filter_enabled": True},
+    {"self_filter_box_filters": self_filter_box_filters},
+    {"self_filter_box_padding": 0.08},
+    {"self_filter_lidar_to_base_x": 0.21},
+    {"self_filter_lidar_to_base_y": 0.0},
+    {"self_filter_lidar_to_base_z": 0.13},
+    {"self_filter_lidar_to_base_roll": 0.0},
+    {"self_filter_lidar_to_base_pitch": 0.0},
+    {"self_filter_lidar_to_base_yaw": 1.5708},
+    {"self_filter_front_crop_enabled": False},
+    {"self_filter_enforce_monotonic_timestamps": True},
+    {"self_filter_drop_stale_stamps": True},
+    {"self_filter_max_stamp_age_s": 1.0},
+    {"self_filter_stamp_regression_tolerance_s": 0.02},
+    {"self_filter_timebase_regression_tolerance_s": 0.02},
+    {"self_filter_min_input_points": 1000},
+    {"self_filter_min_output_points": 1000},
+    {"self_filter_stats_log_period_s": 2.0},
 ]
 
 

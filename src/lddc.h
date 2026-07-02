@@ -30,6 +30,9 @@
 #include "driver_node.h"
 #include "lds.h"
 
+#include <string>
+#include <vector>
+
 namespace livox_ros {
 
 /** Send pointcloud message Data to ros subscriber or save them in rosbag file */
@@ -88,7 +91,7 @@ class Lddc final {
 
   uint8_t GetTransferFormat(void) { return transfer_format_; }
   uint8_t IsMultiTopic(void) { return use_multi_topic_; }
-  void SetRosNode(livox_ros::DriverNode *node) { cur_node_ = node; }
+  void SetRosNode(livox_ros::DriverNode *node);
 
   // void SetRosPub(ros::Publisher *pub) { global_pub_ = pub; };  // NOT USED
   void SetPublishFrq(uint32_t frq) { publish_frq_ = frq; }
@@ -113,6 +116,9 @@ class Lddc final {
   void InitCustomMsg(CustomMsg& livox_msg, const StoragePacket& pkg, uint8_t index);
   void FillPointsToCustomMsg(CustomMsg& livox_msg, const StoragePacket& pkg);
   void PublishCustomPointData(const CustomMsg& livox_msg, const uint8_t index);
+  bool AcceptCustomMsgTimestamp(const CustomMsg& livox_msg);
+  bool AcceptImuTimestamp(uint64_t timestamp);
+  bool ApplySelfFilter(CustomMsg& livox_msg);
 
   void InitPclMsg(const StoragePacket& pkg, PointCloud& cloud, uint64_t& timestamp);
   void FillPointsToPclMsg(const StoragePacket& pkg, PointCloud& pcl_msg);
@@ -131,6 +137,37 @@ class Lddc final {
   PublisherPtr GetCurrentPublisher(uint8_t index);
   PublisherPtr GetCurrentImuPublisher(uint8_t index);
 
+ public:
+  struct Vec3 {
+    double x{0.0};
+    double y{0.0};
+    double z{0.0};
+  };
+
+  struct Mat3 {
+    double v[3][3]{};
+  };
+
+  struct Mat4 {
+    double v[4][4]{};
+  };
+
+  struct BoxFilter {
+    std::string name;
+    Vec3 center;
+    Vec3 rpy;
+    Vec3 size;
+  };
+
+ private:
+  void LoadSelfFilterConfigFromRosParams();
+  void ConfigureSelfFilterTransform();
+  bool RejectBySelfBoxes(const Vec3& point) const;
+  bool RejectByCrop(const Vec3& point) const;
+  void MaybeLogSelfFilterStats(uint32_t total, uint32_t kept, uint32_t rejected_self,
+                               uint32_t rejected_crop, double stamp_age_ms,
+                               double process_ms);
+
  private:
   uint8_t transfer_format_;
   uint8_t use_multi_topic_;
@@ -139,6 +176,39 @@ class Lddc final {
   double publish_frq_;
   uint32_t publish_period_ns_;
   std::string frame_id_;
+
+  bool self_filter_enabled_{false};
+  bool self_filter_front_crop_enabled_{false};
+  bool self_filter_enforce_monotonic_timestamps_{true};
+  bool self_filter_drop_stale_stamps_{true};
+  double self_filter_box_padding_{0.03};
+  double self_filter_lidar_to_base_x_{0.21};
+  double self_filter_lidar_to_base_y_{0.0};
+  double self_filter_lidar_to_base_z_{0.13};
+  double self_filter_lidar_to_base_roll_{0.0};
+  double self_filter_lidar_to_base_pitch_{0.0};
+  double self_filter_lidar_to_base_yaw_{1.5708};
+  double self_filter_front_x_min_{-0.5};
+  double self_filter_front_x_max_{8.0};
+  double self_filter_front_y_min_{-3.0};
+  double self_filter_front_y_max_{3.0};
+  double self_filter_front_z_min_{-2.0};
+  double self_filter_front_z_max_{3.0};
+  double self_filter_max_stamp_age_s_{1.0};
+  double self_filter_stamp_regression_tolerance_s_{0.02};
+  double self_filter_timebase_regression_tolerance_s_{0.02};
+  double self_filter_stats_log_period_s_{2.0};
+  int self_filter_min_input_points_{1000};
+  int self_filter_min_output_points_{1000};
+  uint64_t self_filter_last_lidar_stamp_ns_{0};
+  uint64_t self_filter_last_lidar_timebase_{0};
+  uint64_t self_filter_last_imu_stamp_ns_{0};
+  uint64_t self_filter_dropped_stale_count_{0};
+  uint64_t self_filter_dropped_regression_count_{0};
+  uint64_t self_filter_dropped_low_points_count_{0};
+  uint64_t self_filter_last_stats_log_ns_{0};
+  Mat4 self_filter_lidar_to_base_;
+  std::vector<BoxFilter> self_filter_boxes_;
 
 #ifdef BUILDING_ROS1
   bool enable_lidar_bag_;
