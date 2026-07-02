@@ -11,4 +11,4 @@ unset ROS_PACKAGE_PATH
 source /opt/ros/humble/setup.bash
 
 cd "${SCRIPT_DIR}"
-colcon build --symlink-install --cmake-args -DROS_EDITION=ROS2 -DDISTRO_ROS=humble
+colcon build --symlink-install
